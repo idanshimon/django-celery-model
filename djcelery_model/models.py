@@ -30,11 +30,11 @@ from .signals import post_bulk_update
 
 
 class ModelTaskMetaState(object):
-    PENDING = 0
-    STARTED = 1
-    RETRY   = 2
-    FAILURE = 3
-    SUCCESS = 4
+    PENDING = 1
+    STARTED = 2
+    RETRY   = 3
+    FAILURE = 4
+    SUCCESS = 5
 
     @classmethod
     def lookup(cls, state):
@@ -91,7 +91,7 @@ class ModelTaskMeta(models.Model):
     object_id = models.IntegerField(db_index=True)
     content_object = GenericForeignKey()
     task_id = models.CharField(max_length=255, db_index=True)
-    state = models.PositiveIntegerField(choices=STATES,
+    state = models.IntegerField(choices=STATES,
                                         default=ModelTaskMetaState.PENDING)
     created = models.DateTimeField(auto_now_add=True, editable=False)
     updated = models.DateTimeField(auto_now=True)
