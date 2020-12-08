@@ -9,7 +9,12 @@ from django.db import models
 from django.db.models import Q
 from django.db.models.query import QuerySet
 from django.contrib.contenttypes.models import ContentType
-from django.utils.encoding import python_2_unicode_compatible
+from django.utils import timezone
+
+try:
+    from six import python_2_unicode_compatible
+except ImportError:
+    from django.utils.encoding import python_2_unicode_compatible
 
 try:
     # Django >= 1.7
@@ -21,12 +26,15 @@ from celery.result import AsyncResult
 from celery.utils import uuid
 from celery import signals
 
+from .signals import post_bulk_update
+
+
 class ModelTaskMetaState(object):
-    PENDING = 0
-    STARTED = 1
-    RETRY   = 2
-    FAILURE = 3
-    SUCCESS = 4
+    PENDING = 1
+    STARTED = 2
+    RETRY   = 3
+    FAILURE = 4
+    SUCCESS = 5
 
     @classmethod
     def lookup(cls, state):
@@ -68,6 +76,9 @@ class ModelTaskMetaManager(ModelTaskMetaFilterMixin, models.Manager):
 
 @python_2_unicode_compatible
 class ModelTaskMeta(models.Model):
+    class Meta:
+        unique_together = ('content_type', 'object_id', 'task_id')
+    
     STATES = (
         (ModelTaskMetaState.PENDING, 'PENDING'),
         (ModelTaskMetaState.STARTED, 'STARTED'),
@@ -77,10 +88,10 @@ class ModelTaskMeta(models.Model):
     )
 
     content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
-    object_id = models.PositiveIntegerField()
+    object_id = models.IntegerField(db_index=True)
     content_object = GenericForeignKey()
-    task_id = models.CharField(max_length=255, unique=True)
-    state = models.PositiveIntegerField(choices=STATES,
+    task_id = models.CharField(max_length=255, db_index=True)
+    state = models.IntegerField(choices=STATES,
                                         default=ModelTaskMetaState.PENDING)
     created = models.DateTimeField(auto_now_add=True, editable=False)
     updated = models.DateTimeField(auto_now=True)
@@ -215,29 +226,31 @@ def forget_if_ready(async_result):
         async_result.forget()
 
 
+def perform_update(task_id, **kwargs):
+    kwargs.setdefault('updated', timezone.now())
+    count = ModelTaskMeta.objects.filter(task_id=task_id).update(**kwargs)
+    post_bulk_update.send(sender=ModelTaskMeta, task_id=task_id, count=count, update_kwargs=kwargs)
+
+
 @signals.after_task_publish.connect
 def handle_after_task_publish(sender=None, body=None, **kwargs):
     if body and 'id' in body:
-        queryset = ModelTaskMeta.objects.filter(task_id=body['id'])
-        queryset.update(state=ModelTaskMetaState.PENDING)
+        perform_update(body['id'], state=ModelTaskMetaState.PENDING)
 
 @signals.task_prerun.connect
 def handle_task_prerun(sender=None, task_id=None, **kwargs):
     if task_id:
-        queryset = ModelTaskMeta.objects.filter(task_id=task_id)
-        queryset.update(state=ModelTaskMetaState.STARTED)
+        perform_update(task_id, state=ModelTaskMetaState.STARTED)
 
 @signals.task_postrun.connect
 def handle_task_postrun(sender=None, task_id=None, state=None, **kwargs):
     if task_id and state:
-        queryset = ModelTaskMeta.objects.filter(task_id=task_id)
-        queryset.update(state=ModelTaskMetaState.lookup(state))
+        perform_update(task_id, state=ModelTaskMetaState.lookup(state))
 
 @signals.task_failure.connect
 def handle_task_failure(sender=None, task_id=None, **kwargs):
     if task_id:
-        queryset = ModelTaskMeta.objects.filter(task_id=task_id)
-        queryset.update(state=ModelTaskMetaState.FAILURE)
+        perform_update(task_id, state=ModelTaskMetaState.FAILURE)
 
 @signals.task_revoked.connect
 def handle_task_revoked(sender=None, request=None, **kwargs):
